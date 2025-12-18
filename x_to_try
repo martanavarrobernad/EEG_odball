@@ -1,0 +1,130 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Dec 18 17:24:23 2025
+
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+r"""
+Compare ERPs by GROUPS (EEG):
+
+Groups:
+  - Deviant        = Stimulus/S 41 + Stimulus/S 25
+  - Early Standard = Stimulus/S 35 + Stimulus/S 19
+  - Late Standard  = Stimulus/S 39 + Stimulus/S 23
+
+Plots:
+  1) Group ERPs with 95% CI
+  2) Difference waves (Deviant - Early) and (Deviant - Late)
+"""
+
+from pathlib import Path
+import mne
+
+# =========================
+# PATHS (EEG)
+# =========================
+SUBJECT_DIR = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+EPO_PATH = SUBJECT_DIR / "eeg_step5_epochs" / "eeg_epo.fif"
+
+# =========================
+# SETTINGS
+# =========================
+CH = "Fz"  # <-- pon aquí el canal EEG que quieras
+
+DEVIANTS = ["Stimulus/S 41", "Stimulus/S 25"]
+EARLY_STANDARDS = ["Stimulus/S 35", "Stimulus/S 19"]
+LATE_STANDARDS = ["Stimulus/S 39", "Stimulus/S 23"]
+
+COLOR_MAP = {
+    "Deviant": "crimson",
+    "Early Standard": "royalblue",
+    "Late Standard": "seagreen",
+    "DIFF (Dev-Early)": "black",
+    "DIFF (Dev-Late)": "gray",
+}
+
+epochs = mne.read_epochs(EPO_PATH, preload=True, verbose="ERROR")
+
+# 👇 para ERP: quita alta frecuencia
+epochs_erp = epochs.copy().filter(l_freq=0.5, h_freq=30.0, method="iir",
+                                 iir_params=dict(order=4, ftype="butter"),
+                                 phase="zero", verbose="error")
+
+def require_event(epochs: mne.Epochs, ev: str):
+    if ev not in epochs.event_id:
+        raise RuntimeError(
+            f"Event '{ev}' not found. Available examples: {list(epochs.event_id.keys())[:30]}"
+        )
+
+def combine_epochs(ep: mne.Epochs, events: list[str], label: str) -> mne.Epochs:
+    for ev in events:
+        require_event(ep, ev)
+    parts = [ep[ev] for ev in events]
+    combined = mne.concatenate_epochs(parts)
+    print(f"{CH} | {label}: n={len(combined)}  (from {events})")
+    return combined
+
+def plot_groups(ep: mne.Epochs):
+    ep = ep.copy().pick(CH)
+
+    ep_dev   = combine_epochs(ep, DEVIANTS, "Deviant")
+    ep_early = combine_epochs(ep, EARLY_STANDARDS, "Early Standard")
+    ep_late  = combine_epochs(ep, LATE_STANDARDS, "Late Standard")
+
+    # 1) Group ERPs with 95% CI
+    evokeds_for_plot = {
+        "Deviant": ep_dev.average(),
+        "Early Standard": ep_early.average(),
+        "Late Standard": ep_late.average(),
+    }
+    colors_used = {k: COLOR_MAP[k] for k in evokeds_for_plot.keys()}
+
+    mne.viz.plot_compare_evokeds(
+        evokeds_for_plot,
+        picks=CH,
+        ci=0.95,
+        colors=colors_used,
+        title=f"EEG | {CH} | Deviant (41+25) vs Early (35+19) vs Late (39+23)",
+        show=True,
+    )
+
+    # 2) Difference waves
+    evo_dev = ep_dev.average()
+    evo_early = ep_early.average()
+    evo_late = ep_late.average()
+
+    diff_dev_early = mne.combine_evoked([evo_dev, evo_early], weights=[1, -1])
+    diff_dev_late  = mne.combine_evoked([evo_dev, evo_late],  weights=[1, -1])
+
+    mne.viz.plot_compare_evokeds(
+        {"DIFF (Dev-Early)": diff_dev_early},
+        picks=CH,
+        ci=None,
+        colors={"DIFF (Dev-Early)": COLOR_MAP["DIFF (Dev-Early)"]},
+        title=f"EEG | {CH} | DIFF = Deviant(41+25) - Early(35+19)",
+        show=True,
+    )
+
+    mne.viz.plot_compare_evokeds(
+        {"DIFF (Dev-Late)": diff_dev_late},
+        picks=CH,
+        ci=None,
+        colors={"DIFF (Dev-Late)": COLOR_MAP["DIFF (Dev-Late)"]},
+        title=f"EEG | {CH} | DIFF = Deviant(41+25) - Late(39+23)",
+        show=True,
+    )
+
+# =========================
+# RUN
+# =========================
+epochs = mne.read_epochs(EPO_PATH, preload=True, verbose="ERROR")
+
+if CH not in epochs.ch_names:
+    raise RuntimeError(f"Channel {CH} not in epochs. Available: {epochs.ch_names}")
+
+print("\n==============================================")
+print(f"EEG | {EPO_PATH.name}")
+
+plot_groups(epochs)
