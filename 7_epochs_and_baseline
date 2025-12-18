@@ -1,0 +1,73 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Dec 18 17:18:38 2025
+
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+r"""
+STEP 5 — Epoching + baseline (hand-mixed)
+Paper:
+  epochs:   -0.200 to +0.700 s
+  baseline: -0.110 to -0.010 s
+
+SIN condiciones (un solo recording ya limpio).
+"""
+
+from pathlib import Path
+import mne
+
+BASE = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+
+IN_FIF  = BASE / "eeg_step4_cleaned" / "eeg_clean_30_400_ica_avg.fif"
+OUT_DIR = BASE / "eeg_step5_epochs"
+OUT_DIR.mkdir(exist_ok=True, parents=True)
+
+CONDITION = "hand-mixed"
+
+def pick_events_from_annotations(raw):
+    events, event_id = mne.events_from_annotations(raw, verbose="warning")
+    if events is None or len(events) == 0:
+        raise RuntimeError("No events found in annotations. Revisa .vmrk / annotations.")
+    return events, event_id
+
+def step5_epoch():
+    if not IN_FIF.exists():
+        raise FileNotFoundError(f"No existe: {IN_FIF}")
+
+    print(f"\n===== sub-P01, {CONDITION} — EPOCHING =====")
+    raw = mne.io.read_raw_fif(IN_FIF, preload=True, verbose="warning")
+
+    # Events
+    try:
+        events, event_id = pick_events_from_annotations(raw)
+    except Exception as e:
+        print("⚠ No pude extraer events de annotations.")
+        print("   Error:", e)
+        print("   Annotation descriptions disponibles (primeras 50):")
+        desc = list(dict.fromkeys(raw.annotations.description))  # únicos preservando orden
+        print(desc[:50])
+        raise
+
+    print(f"→ Found {len(events)} events. event_id keys (first 30): {list(event_id.keys())[:30]}")
+
+    # Epochs
+    epochs = mne.Epochs(
+        raw,
+        events,
+        event_id=event_id,          # si quieres uno específico, filtra aquí
+        tmin=-0.2,
+        tmax=0.7,
+        baseline=(-0.11, -0.01),
+        reject_by_annotation=True,
+        preload=True,
+        verbose="warning",
+    )
+
+    out_path = OUT_DIR / f"{CONDITION}_epo.fif"
+    epochs.save(out_path, overwrite=True)
+    print("✔ Saved:", out_path)
+
+if __name__ == "__main__":
+    step5_epoch()
