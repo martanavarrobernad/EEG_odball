@@ -1,13 +1,23 @@
 # -*- coding: utf-8 -*-
-r"""
-EEG – Paso 2 (para tu salida NoStimArtifact_1000Hz_aa.fif)
+"""
+Created on Thu Dec 18 16:51:17 2025
 
-Objetivo:
-  ✔ Conservar TODOS los canales (EEG + otros)
-  ✔ Detectar canales EEG malos (manual PSD + auto RMS)
-  ✔ Interpolar SOLO esos EEG malos
-  ✔ Filtrar 0.5–45 Hz sin borrar canales no EEG
-  ✔ Guardar eeg_allblocks_05_45.fif por sujeto
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+r"""
+EEG – Paso 2 (NoStimArtifact_1000Hz_aa.fif) — versión ROBUSTA
+
+- Lee runs directamente de:
+  C:\Users\navar\Desktop\sub-P01\sub-P01\eeg_1000Hz_noStimArt\
+
+- Combina bads manuales (PSD) + RMS auto
+- Interpola SOLO EEG (safe) y revierte si mete NaN/Inf
+- Filtra 0.5–45 Hz excluyendo triggers/markers por nombre
+- Guarda:
+  eeg_step2_clean_concat_05_45\eeg_allblocks_05_45.fif
+  bad_eeg_channels_final.csv
 """
 
 from pathlib import Path
@@ -17,19 +27,21 @@ import pandas as pd
 import mne
 
 # ==========================
-# Paths (TU ESTRUCTURA)
+# Paths (TU CASO REAL)
 # ==========================
-BASE = Path(r"C:\Users\navar\Desktop")
+BASE = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
 
-IN_DIR  = BASE / "eeg_1000Hz_noStimArt"              # <- donde guardaste *_1000Hz_aa.fif
+IN_DIR  = BASE / "eeg_1000Hz_noStimArt"
 OUT_DIR = BASE / "eeg_step2_clean_concat_05_45"
 OUT_DIR.mkdir(exist_ok=True, parents=True)
 
 BAD_PSD_CSV   = BASE / "bad_eeg_channels_from_psd_clicks.csv"
 BAD_FINAL_CSV = BASE / "bad_eeg_channels_final.csv"
 
+SUBJECT_ID = "sub-P01"
+
 # ==========================
-# Tus 62 canales EEG reales (exactos)
+# Tus 62 canales EEG reales
 # ==========================
 EEG_CHANNELS = [
     "Fp1", "Fz", "F3", "F7", "FT9", "FC5", "FC1", "C3", "T7", "TP9",
@@ -42,37 +54,44 @@ EEG_CHANNELS = [
 ]
 
 # ==========================
-# Cargar malos manuales del PSD
-# (tu CSV actual suele tener columnas: subject, run, file, bad_channels)
-# -> aquí agregamos por sujeto
+# Diagnóstico NaN/Inf
 # ==========================
-def load_bad_from_psd():
+def assert_finite(raw, tag=""):
+    x = raw.get_data()
+    if np.isfinite(x).all():
+        print(f"✅ [{tag}] sin NaN/Inf")
+        return True
+
+    mask = ~np.isfinite(x)
+    ch_idx = np.where(mask.any(axis=1))[0]
+    print(f"\n❌ [{tag}] NaN/Inf detectado en {len(ch_idx)} canales")
+    for i in ch_idx:
+        bad_pos = np.where(mask[i])[0]
+        print(f"   - {raw.ch_names[i]}: {len(bad_pos)} muestras (primera={bad_pos[0]}, última={bad_pos[-1]})")
+    raise ValueError(f"array must not contain infs or NaNs  --> [{tag}]")
+
+# ==========================
+# PSD manual bads (solo este sujeto)
+# ==========================
+def load_bad_from_psd_for_subject(subj: str):
     if not BAD_PSD_CSV.exists():
         print("⚠ No PSD CSV → sin malos manuales.")
-        return {}
+        return []
 
     df = pd.read_csv(BAD_PSD_CSV)
-
     if "subject" not in df.columns or "bad_channels" not in df.columns:
-        print("⚠ PSD CSV no tiene columnas esperadas (subject, bad_channels).")
-        return {}
+        print("⚠ PSD CSV sin columnas esperadas.")
+        return []
 
-    bad_dict = {}
-    for _, r in df.iterrows():
-        subj = str(r["subject"]).strip()
-        bc = r["bad_channels"]
-
+    df_sub = df[df["subject"].astype(str).str.strip() == subj]
+    bad = set()
+    for bc in df_sub["bad_channels"].tolist():
         if isinstance(bc, str) and bc.strip():
-            chans = [c.strip() for c in bc.split(";") if c.strip()]
-        else:
-            chans = []
-
-        bad_dict.setdefault(subj, set()).update(chans)
-
-    return {k: sorted(v) for k, v in bad_dict.items()}
+            bad.update([c.strip() for c in bc.split(";") if c.strip()])
+    return sorted(bad)
 
 # ==========================
-# Detección RMS automática (solo EEG reales)
+# RMS auto (solo EEG reales)
 # ==========================
 def detect_bad_by_rms(raw, eeg_names, factor=5.0):
     picks = mne.pick_channels(raw.ch_names, include=eeg_names)
@@ -82,7 +101,6 @@ def detect_bad_by_rms(raw, eeg_names, factor=5.0):
     data = raw.get_data(picks=picks)
     rms = np.sqrt(np.mean(data ** 2, axis=1))
     med = np.median(rms)
-
     if med == 0:
         return []
 
@@ -90,125 +108,145 @@ def detect_bad_by_rms(raw, eeg_names, factor=5.0):
     return [raw.ch_names[picks[i]] for i in bad_idx]
 
 # ==========================
-# Encontrar runs NoStimArtifact ya filtrados + 1000Hz
+# Runs (directo en IN_DIR)
 # ==========================
-def find_runs(subj_dir: Path):
-    # Solo los que vienen de NoStimArtifact y son la salida *_1000Hz_aa.fif
-    return sorted(subj_dir.glob("*NoStimArtifact*_1000Hz_aa.fif"))
+def find_runs():
+    files = sorted(IN_DIR.glob("*Run*_NoStimArtifact*_1000Hz_aa.fif"))
+    if not files:
+        files = sorted(IN_DIR.glob("*NoStimArtifact*_1000Hz_aa.fif"))
+    return files
 
 # ==========================
-# Pipeline principal
+# Paso 2
 # ==========================
-def step2_clean_and_concat(subjects=None, rms_factor=5.0):
-    """
-    subjects:
-      - None -> detecta carpetas sub-* dentro de IN_DIR
-      - o lista/tupla: ("sub-P01", "sub-P02", ...)
-    """
-    bad_psd_dict = load_bad_from_psd()
-    final_bad_rows = []
+def step2_clean_and_concat(rms_factor=5.0):
+    fif_files = find_runs()
+    if not fif_files:
+        raise FileNotFoundError(f"No matching *NoStimArtifact*_1000Hz_aa.fif in {IN_DIR}")
 
-    if subjects is None:
-        subj_dirs = sorted([p for p in IN_DIR.glob("sub-*") if p.is_dir()])
-        subjects = [p.name for p in subj_dirs]
+    print(f"Encontrados {len(fif_files)} runs en {IN_DIR}")
 
-    for subj in subjects:
-        subj_dir = IN_DIR / subj
-        fif_files = find_runs(subj_dir)
+    manual_bad = load_bad_from_psd_for_subject(SUBJECT_ID)
+    if manual_bad:
+        print(f"Manual bad (PSD) {SUBJECT_ID}: {manual_bad}")
 
-        if not fif_files:
-            print(f"{subj}: no matching *NoStimArtifact*_1000Hz_aa.fif files.")
-            continue
+    raws = []
+    auto_bad_all = []
 
-        print(f"\n===== {subj} =====")
+    # ---- leer runs
+    for fif in fif_files:
+        print(f"\nLoading {fif.name}")
+        raw_block = mne.io.read_raw_fif(fif, preload=True, verbose="warning")
 
-        raws = []
-        auto_bad_all = []
+        # sanity: por si ya viniera algo raro
+        assert_finite(raw_block, tag=f"after_read {fif.name}")
 
-        for fif in fif_files:
-            print(f"  Loading {fif.name}")
-            raw_block = mne.io.read_raw_fif(fif, preload=True, verbose="warning")
+        eeg_present = [ch for ch in EEG_CHANNELS if ch in raw_block.ch_names]
+        bad_rms = detect_bad_by_rms(raw_block, eeg_present, factor=rms_factor)
+        if bad_rms:
+            print(f" → Auto RMS bad: {bad_rms}")
+            auto_bad_all.extend(bad_rms)
 
-            # EEG existentes en ESTE archivo (de tu lista de 62)
-            eeg_present = [ch for ch in EEG_CHANNELS if ch in raw_block.ch_names]
+        raws.append(raw_block)
 
-            # Auto RMS solo en EEG
-            bad_rms = detect_bad_by_rms(raw_block, eeg_present, factor=rms_factor)
-            if bad_rms:
-                print(f"   → Auto RMS bad: {bad_rms}")
-                auto_bad_all.extend(bad_rms)
+    # ---- concatenar
+    print("\n→ Concatenating blocks...")
+    raw = mne.concatenate_raws(raws)
+    assert_finite(raw, tag="after_concatenate")
 
-            raws.append(raw_block)
+    # ---- asegurar tipos EEG (si venían como misc)
+    mapping = {ch: "eeg" for ch in EEG_CHANNELS if ch in raw.ch_names}
+    if mapping:
+        raw.set_channel_types(mapping)
 
-        # Concatenar todos los bloques (conservando todos los canales)
-        print("  → Concatenating blocks...")
-        raw = mne.concatenate_raws(raws)
+    # ---- montage (para interpolación)
+    montage = mne.channels.make_standard_montage("standard_1020")
+    raw.set_montage(montage, on_missing="ignore")
 
-        # (Recomendado) set montage para que interpolate_bads funcione bien
-        try:
-            montage = mne.channels.make_standard_montage("standard_1020")
-            raw.set_montage(montage, on_missing="ignore")
-        except Exception as e:
-            print(f"  ⚠ No pude setear montage (se intenta seguir igual): {e}")
+    # ---- combinar bads
+    auto_bad = sorted(set(auto_bad_all))
+    combined_bad = sorted(set(manual_bad + auto_bad))
+    combined_bad = [c for c in combined_bad if (c in raw.ch_names and c in EEG_CHANNELS)]
 
-        # Combinar manual + auto (por sujeto)
-        manual_bad = bad_psd_dict.get(subj, [])
-        auto_bad = sorted(set(auto_bad_all))
-        combined_bad = sorted(set(manual_bad + auto_bad))
-
-        # Quedarnos SOLO con EEG reales y que existan
-        combined_bad = [c for c in combined_bad if (c in raw.ch_names and c in EEG_CHANNELS)]
-
-        if combined_bad:
-            print(f"  → Final bad EEG for {subj}: {combined_bad}")
-            raw.info["bads"] = combined_bad
-        else:
-            print("  → No EEG bads for this subject.")
-
-        # Interpolar SOLO si hay suficientes EEG buenos
-        if combined_bad:
-            all_eeg = [ch for ch in EEG_CHANNELS if ch in raw.ch_names]
-            good = [ch for ch in all_eeg if ch not in combined_bad]
-            if len(good) < 4:
-                print("  ⚠ Too few good EEG channels → skip interpolation.")
-            else:
-                print("  → Interpolating EEG bad channels...")
-                raw.interpolate_bads(reset_bads=False)
-
-        # Filtrado global (sin borrar canales no EEG)
-        print("  → Filtering 0.5–45 Hz (all channels)...")
-        raw.filter(
-            l_freq=0.5,
-            h_freq=45.0,
-            method="iir",
-            iir_params=dict(order=4, ftype="butter"),
-            phase="zero",
-            picks="all",
-            verbose="error",
-        )
-
-        # Guardar
-        out_sub = OUT_DIR / subj
-        out_sub.mkdir(exist_ok=True, parents=True)
-        out_path = out_sub / "eeg_allblocks_05_45.fif"
-        raw.save(out_path, overwrite=True)
-        print("  ✔ Saved:", out_path)
-
-        final_bad_rows.append({
-            "subject": subj,
-            "bad_channels": ";".join(combined_bad)
-        })
-
-    if final_bad_rows:
-        pd.DataFrame(final_bad_rows).to_csv(BAD_FINAL_CSV, index=False)
-        print(f"\n✔ Final bad channels CSV saved → {BAD_FINAL_CSV}")
+    if combined_bad:
+        print(f"\n→ Final bad EEG: {combined_bad}")
+        raw.info["bads"] = combined_bad
     else:
-        print("\nNo subjects processed → no final CSV.")
+        print("\n→ No EEG bads.")
 
+    # ---- interpolación SAFE (solo EEG) y revertir si mete NaN/Inf
+        # ---- interpolación SAFE (solo EEG, compatible con MNE antiguo)
+    if combined_bad:
+        all_eeg = [ch for ch in EEG_CHANNELS if ch in raw.ch_names]
+        good = [ch for ch in all_eeg if ch not in combined_bad]
+
+        if len(good) < 4:
+            print("  ⚠ Too few good EEG channels → skip interpolation.")
+        else:
+            print("  → Interpolating bad EEG channels (SAFE, no picks=)...")
+
+            # Copia completa para poder revertir si algo sale mal
+            raw_before = raw.copy()
+
+            # Sanity check previo
+            assert_finite(raw, tag="before_interpolate_bads")
+
+            try:
+                # 1) Copia SOLO EEG
+                raw_eeg = raw.copy().pick(all_eeg)
+
+                # 2) Marcar bads e interpolar (sin picks=)
+                raw_eeg.info["bads"] = combined_bad
+                raw_eeg.interpolate_bads(reset_bads=False)
+
+                # 3) Volcar SOLO los canales interpolados al raw completo
+                for ch in combined_bad:
+                    if ch in raw.ch_names and ch in raw_eeg.ch_names:
+                        raw._data[
+                            raw.ch_names.index(ch), :
+                        ] = raw_eeg._data[
+                            raw_eeg.ch_names.index(ch), :
+                        ]
+
+            except Exception as e:
+                print(f"  ⚠ Interpolation crashed: {e} → REVERT")
+                raw = raw_before
+
+            # Sanity check posterior
+            try:
+                assert_finite(raw, tag="after_interpolate_bads")
+            except ValueError:
+                print("  ⚠ Interpolation introduced NaN/Inf → REVERT")
+                raw = raw_before
+
+
+    # ---- filtro evitando triggers/markers por nombre
+    exclude = [ch for ch in raw.ch_names if re.search(r"(stim|sti|trig|trigger|marker)", ch, re.I)]
+    picks = [ch for ch in raw.ch_names if ch not in exclude]
+
+    assert_finite(raw, tag="before_filter")
+    print(f"\n→ Filtering 0.5–45 Hz (excluding {len(exclude)} trigger-like channels)...")
+    raw.filter(
+        l_freq=0.5,
+        h_freq=45.0,
+        method="iir",
+        iir_params=dict(order=4, ftype="butter"),
+        phase="zero",
+        picks=picks,
+        verbose="error",
+    )
+    assert_finite(raw, tag="after_filter")
+
+    # ---- guardar
+    out_path = OUT_DIR / "eeg_allblocks_05_45.fif"
+    raw.save(out_path, overwrite=True)
+    print("\n✔ Saved:", out_path)
+
+    pd.DataFrame([{
+        "subject": SUBJECT_ID,
+        "bad_channels": ";".join(combined_bad)
+    }]).to_csv(BAD_FINAL_CSV, index=False)
+    print(f"✔ Final bad channels CSV saved → {BAD_FINAL_CSV}")
 
 if __name__ == "__main__":
-    # Para tu caso directo:
-    step2_clean_and_concat(subjects=("sub-P01",), rms_factor=5.0)
-
-    # Si luego quieres todos los que existan en IN_DIR:
-    # step2_clean_and_concat(subjects=None, rms_factor=5.0)
+    step2_clean_and_concat(rms_factor=5.0)
