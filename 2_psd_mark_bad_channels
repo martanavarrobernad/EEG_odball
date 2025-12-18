@@ -1,20 +1,13 @@
 # -*- coding: utf-8 -*-
-"""
-Created on Thu Dec 18 16:09:43 2025
-
-@author: navar
-"""
-
-# -*- coding: utf-8 -*-
 r"""
 EEG — Inspección visual de canales ruidosos mediante PSD interactivo.
 Clic para marcar canales malos.
 
 Entrada:
-  C:\Users\navar\Desktop\eeg_1000Hz_noStimArt\sub-P01\*_NoStimArtifact*_1000Hz_aa.fif
+  C:\Users\navar\Desktop\sub-P01\sub-P01\eeg_1000Hz_noStimArt\MULTICONS_*_Run*_NoStimArtifact*_1000Hz_aa.fif
 
 Salida:
-  C:\Users\navar\Desktop\bad_eeg_channels_from_psd_clicks.csv
+  C:\Users\navar\Desktop\sub-P01\sub-P01\bad_eeg_channels_from_psd_clicks.csv
 """
 
 from pathlib import Path
@@ -25,9 +18,9 @@ import matplotlib.pyplot as plt
 import mne
 
 # ==========================
-# Paths (ajustado a tu salida)
+# Paths (TU CASO REAL)
 # ==========================
-BASE = Path(r"C:\Users\navar\Desktop\sub-P01\\sub-P01")
+BASE = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
 IN_DIR = BASE / "eeg_1000Hz_noStimArt"
 OUTPUT_CSV = BASE / "bad_eeg_channels_from_psd_clicks.csv"
 
@@ -47,21 +40,15 @@ EEG_CHANNELS = [
 # ==========================
 # Helpers
 # ==========================
-def find_eeg_runs_for_subject(subj: str):
-    """
-    subj: "sub-P01" (o el nombre exacto de tu carpeta de sujeto)
-    Solo coge fif derivados de NoStimArtifact.
-    """
-    subj_dir = IN_DIR / subj
-    if not subj_dir.exists():
-        return []
-    return sorted(subj_dir.glob("*NoStimArtifact*_1000Hz_aa.fif"))
+def find_runs():
+    # Coge Run1, Run2, ... solo de NoStimArtifact y ya a 1000Hz_aa
+    files = sorted(IN_DIR.glob("*Run*_NoStimArtifact*_1000Hz_aa.fif"))
+    # fallback por si el naming no tiene _Run pegado:
+    if not files:
+        files = sorted(IN_DIR.glob("*NoStimArtifact*_1000Hz_aa.fif"))
+    return files
 
 def extract_run_number(fname: str) -> int:
-    """
-    Saca run de nombres tipo:
-      ..._Run1_... o ...Run1... (case-insensitive)
-    """
     m = re.search(r"Run\s*([0-9]+)", fname, flags=re.IGNORECASE)
     return int(m.group(1)) if m else -1
 
@@ -89,16 +76,14 @@ def interactive_psd_bad_selection(raw_eeg, fmin=0.5, fmax=45):
 
     bad_channels = set()
 
-    lines = []
     for ch_idx, ch_name in enumerate(psd.ch_names):
-        line, = ax.plot(
+        ax.plot(
             freqs,
             psds[ch_idx],
             label=ch_name,
             picker=True,
             pickradius=5,
         )
-        lines.append(line)
 
     ax.legend(loc="best", fontsize="small")
 
@@ -130,38 +115,35 @@ def interactive_psd_bad_selection(raw_eeg, fmin=0.5, fmax=45):
 # ==========================
 # Pipeline principal
 # ==========================
-def eeg_psd_click_inspection(subjects=("sub-P01",)):
+def eeg_psd_click_inspection():
     rows = []
 
-    for subj in subjects:
-        fif_files = find_eeg_runs_for_subject(subj)
-        if not fif_files:
-            print(f"{subj}: no matching *NoStimArtifact*_1000Hz_aa.fif files.")
+    fif_files = find_runs()
+    if not fif_files:
+        print(f"No matching files in {IN_DIR}")
+        return
+
+    print(f"Encontrados {len(fif_files)} runs en {IN_DIR}")
+
+    for fif in fif_files:
+        print(f"\nLoading {fif.name}")
+        raw = mne.io.read_raw_fif(fif, preload=True, verbose="warning")
+
+        eeg_ch = [ch for ch in EEG_CHANNELS if ch in raw.ch_names]
+        if not eeg_ch:
+            print("⚠ No EEG channels found in this file.")
             continue
 
-        print(f"\n===== {subj} =====")
+        raw_eeg = raw.copy().pick(eeg_ch)
 
-        for fif in fif_files:
-            print(f"  Loading {fif.name}")
-            raw = mne.io.read_raw_fif(fif, preload=True, verbose="warning")
+        print("→ Mostrando PSD...")
+        bad_ch = interactive_psd_bad_selection(raw_eeg, fmin=0.5, fmax=45)
 
-            # solo EEG que existan en el archivo
-            eeg_ch = [ch for ch in EEG_CHANNELS if ch in raw.ch_names]
-            if not eeg_ch:
-                print("   ⚠ No EEG channels found in this file.")
-                continue
+        run_num = extract_run_number(fif.name)
+        bad_str = ";".join(bad_ch)
+        print(f"→ Seleccionados: {bad_str if bad_str else '(ninguno)'}")
 
-            raw_eeg = raw.copy().pick(eeg_ch)
-
-            print("   → Mostrando PSD...")
-            bad_ch = interactive_psd_bad_selection(raw_eeg, fmin=0.5, fmax=45)
-
-            run_num = extract_run_number(fif.name)
-
-            bad_str = ";".join(bad_ch)
-            print(f"   → Seleccionados: {bad_str if bad_str else '(ninguno)'}")
-
-            rows.append((subj, run_num, fif.name, bad_str))
+        rows.append(("sub-P01", run_num, fif.name, bad_str))
 
     if rows:
         print(f"\nEscribiendo CSV → {OUTPUT_CSV}")
@@ -174,4 +156,4 @@ def eeg_psd_click_inspection(subjects=("sub-P01",)):
         print("\nNo se seleccionaron canales malos → no se crea CSV.")
 
 if __name__ == "__main__":
-    eeg_psd_click_inspection(subjects=("sub-P01",))
+    eeg_psd_click_inspection()
