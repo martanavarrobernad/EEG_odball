@@ -1,0 +1,67 @@
+# -*- coding: utf-8 -*-
+r"""
+Created on Thu Dec 18 15:52:57 2025
+
+@author: navar
+
+EEG Paso 1 (correcto si el raw está a 10 kHz):
+1) Low-pass anti-alias a 450 Hz
+2) Resample a 1000 Hz
+3) Guardar a FIF
+
+Entrada:
+  C:\Users\navar\Desktop\sub-P01\sub-P01\*.vhdr
+
+Salida:
+  C:\Users\navar\Desktop\eeg_1000Hz_noStimArt\sub-P01\*_1000Hz_aa.fif
+"""
+
+from pathlib import Path
+import mne
+
+IN_DIR  = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+OUT_DIR = Path(r"C:\Users\navar\Desktop\eeg_1000Hz_noStimArt\sub-P01")
+OUT_DIR.mkdir(exist_ok=True, parents=True)
+
+TARGET_FS = 1000.0
+H_CUTOFF  = 450.0  # anti-alias para Nyquist=500 tras downsample
+
+def antialias_and_downsample():
+    vhdr_files = sorted(IN_DIR.glob("*NoStimArtifact*.vhdr"))
+    if not vhdr_files:
+        raise FileNotFoundError(f"No encontré .vhdr en: {IN_DIR}")
+
+    print(f"Encontrados {len(vhdr_files)} archivos .vhdr en {IN_DIR}")
+
+    for vhdr in vhdr_files:
+        print(f"\nLoading: {vhdr.name}")
+        raw = mne.io.read_raw_brainvision(vhdr, preload=True, verbose="error")
+
+        sfreq = float(raw.info["sfreq"])
+        print(f"fs original: {sfreq} Hz")
+
+        if sfreq <= TARGET_FS:
+            # Si ya está a 1000 (o menos), no tiene sentido resamplear hacia abajo aquí
+            # (y el filtro anti-alias para downsample quizá no aplique).
+            raise RuntimeError(
+                f"{vhdr.name}: fs={sfreq} Hz; este script es para datos > {TARGET_FS} Hz (p.ej. 10 kHz)."
+            )
+
+        print(f"→ Low-pass anti-alias (h_freq={H_CUTOFF} Hz)")
+        raw.filter(
+            l_freq=None,
+            h_freq=H_CUTOFF,
+            method="fir",
+            fir_design="firwin2",
+            verbose="error",
+        )
+
+        print(f"→ Resampling to {TARGET_FS} Hz")
+        raw.resample(TARGET_FS, npad="auto", verbose="error")
+
+        out_path = OUT_DIR / f"{vhdr.stem}_1000Hz_aa.fif"
+        raw.save(out_path, overwrite=True)
+        print(f"✔ Saved: {out_path}")
+
+if __name__ == "__main__":
+    antialias_and_downsample()
