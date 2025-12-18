@@ -27,7 +27,7 @@ import mne
 # ==========================
 # Paths (ajustado a tu salida)
 # ==========================
-BASE = Path(r"C:\Users\navar\Desktop")
+BASE = Path(r"C:\Users\navar\Desktop\sub-P01\\sub-P01")
 IN_DIR = BASE / "eeg_1000Hz_noStimArt"
 OUTPUT_CSV = BASE / "bad_eeg_channels_from_psd_clicks.csv"
 
