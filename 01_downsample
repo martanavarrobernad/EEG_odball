@@ -20,7 +20,7 @@ from pathlib import Path
 import mne
 
 IN_DIR  = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
-OUT_DIR = Path(r"C:\Users\navar\Desktop\eeg_1000Hz_noStimArt\sub-P01")
+OUT_DIR = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01\eeg_1000Hz_noStimArt")
 OUT_DIR.mkdir(exist_ok=True, parents=True)
 
 TARGET_FS = 1000.0
