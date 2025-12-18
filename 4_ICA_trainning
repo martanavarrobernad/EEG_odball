@@ -1,0 +1,195 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Dec 18 16:59:02 2025
+
+@author: navar
+"""
+# -*- coding: utf-8 -*-
+r"""
+PASO EEG-3 — ICA TRAINING (EEG-only) + detección EOG/ECG (VEOG/HEOG/ECG)
+
+Entrada:
+  C:\Users\navar\Desktop\sub-P01\sub-P01\eeg_step2_clean_concat_05_45\eeg_allblocks_05_45.fif
+
+Salida:
+  C:\Users\navar\Desktop\sub-P01\sub-P01\eeg_step3_ica\
+    - ica_fitted_sr250Hz.fif
+    - ica_sources_raw_sr250Hz.fif
+    - ica_component_scores.csv  (correlación con VEOG/HEOG/ECG)
+"""
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import mne
+import mne.preprocessing
+
+# ==========================
+# Paths (TU CASO REAL)
+# ==========================
+BASE = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+
+IN_FIF = BASE / "eeg_step2_clean_concat_05_45" / "eeg_allblocks_05_45.fif"
+OUT_DIR = BASE / "eeg_step3_ica"
+OUT_DIR.mkdir(exist_ok=True, parents=True)
+
+# ==========================
+# Canales
+# ==========================
+EEG_CHANNELS = [
+    "Fp1", "Fz", "F3", "F7", "FT9", "FC5", "FC1", "C3", "T7", "TP9",
+    "CP5", "CP1", "Pz", "P3", "P7", "O1", "Oz", "O2", "P4", "P8",
+    "TP10", "CP6", "CP2", "C4", "T8", "FT10", "FC6", "FC2", "F4", "F8",
+    "Fp2", "AF7", "AF3", "AFz", "F1", "F5", "FT7", "FC3", "C1", "C5",
+    "TP7", "CP3", "P1", "P5", "PO7", "PO3", "POz", "PO4", "PO8", "P6",
+    "P2", "CPz", "CP4", "TP8", "C6", "C2", "FC4", "FT8", "F6", "AF8",
+    "AF4", "F2"
+]
+
+# Pon aquí EXACTAMENTE los nombres como salen en raw.ch_names
+VEOG_CH = "VEOG"
+HEOG_CH = "HEOG"
+ECG_CH  = "ECG"
+
+# ==========================
+# ICA params
+# ==========================
+SRATE_ICA = 250.0
+MAX_DUR_SEC = 600.0
+ICA_DECIM = 3
+
+def _existing(raw, name):
+    return name if (name in raw.ch_names) else None
+
+def step3_ica_training():
+    if not IN_FIF.exists():
+        raise FileNotFoundError(f"No existe: {IN_FIF}")
+
+    print("\n===== sub-P01 — ICA TRAINING (EEG-only) + EOG/ECG detection =====")
+
+    # 1) cargar sin preload para crop primero
+    raw = mne.io.read_raw_fif(IN_FIF, preload=False, verbose="warning")
+    total_dur = float(raw.times[-1])
+    print(f"   Total duration: {total_dur:.1f} s")
+
+    if total_dur > MAX_DUR_SEC:
+        print(f"→ Cropping to first {MAX_DUR_SEC:.1f} s")
+        raw.crop(tmin=0.0, tmax=MAX_DUR_SEC)
+
+    raw.load_data()
+
+    # 2) asegurar tipos si vienen raros
+    # EEG
+    mapping = {ch: "eeg" for ch in EEG_CHANNELS if ch in raw.ch_names}
+    if mapping:
+        raw.set_channel_types(mapping)
+
+    # EOG / ECG (si existen)
+    veog = _existing(raw, VEOG_CH)
+    heog = _existing(raw, HEOG_CH)
+    ecg  = _existing(raw, ECG_CH)
+
+    type_map = {}
+    if veog: type_map[veog] = "eog"
+    if heog: type_map[heog] = "eog"
+    if ecg:  type_map[ecg]  = "ecg"
+    if type_map:
+        raw.set_channel_types(type_map)
+
+    print(f"   Found VEOG: {bool(veog)} | HEOG: {bool(heog)} | ECG: {bool(ecg)}")
+
+    # Montage (para que ICA/topos salgan bien)
+    montage = mne.channels.make_standard_montage("standard_1020")
+    raw.set_montage(montage, on_missing="ignore")
+
+    # 3) seleccionar EEG para ICA
+    eeg_ch = [ch for ch in EEG_CHANNELS if ch in raw.ch_names]
+    if not eeg_ch:
+        raise RuntimeError("No encuentro canales EEG de tu lista en el raw.")
+
+    print(f"→ Using {len(eeg_ch)} EEG channels for ICA training.")
+    raw_eeg = raw.copy().pick(eeg_ch)
+
+    # 4) resample a 250 Hz
+    sfreq = float(raw_eeg.info["sfreq"])
+    if sfreq > SRATE_ICA + 1e-6:
+        print(f"→ Downsampling EEG {sfreq:.1f} → {SRATE_ICA:.1f} Hz")
+        raw_eeg_resamp = raw_eeg.copy().resample(SRATE_ICA, npad="auto")
+    else:
+        raw_eeg_resamp = raw_eeg.copy()
+
+    # 5) estimar rango (PCA)
+    print("→ Estimating EEG rank for PCA...")
+    try:
+        rank_res = mne.compute_rank(raw_eeg_resamp, tol="auto")
+        data_rank = rank_res.get("eeg", len(eeg_ch)) if isinstance(rank_res, dict) else int(rank_res)
+    except Exception:
+        data_rank = len(eeg_ch)
+
+    print(f"   Estimated EEG rank: {data_rank} / {len(eeg_ch)}")
+
+    # 6) entrenar ICA (Infomax extended)
+    print(f"→ Fitting ICA (Infomax extended) decim={ICA_DECIM} ...")
+    ica = mne.preprocessing.ICA(
+        method="infomax",
+        n_components=data_rank,
+        max_iter="auto",
+        random_state=97,
+        fit_params=dict(extended=True),
+    )
+    ica.fit(raw_eeg_resamp, decim=ICA_DECIM)
+
+    # 7) guardar ICA + sources
+    ica_path = OUT_DIR / f"ica_fitted_sr{int(SRATE_ICA)}Hz.fif"
+    ica.save(ica_path)
+    print("✔ ICA saved:", ica_path)
+
+    sources = ica.get_sources(raw_eeg_resamp)
+    src_path = OUT_DIR / f"ica_sources_raw_sr{int(SRATE_ICA)}Hz.fif"
+    sources.save(src_path, overwrite=True)
+    print("✔ ICA sources saved:", src_path)
+
+    # 8) detectar componentes relacionados con VEOG/HEOG/ECG
+    # (no excluye automáticamente; guarda scores para decidir)
+    rows = []
+    n_comp = ica.n_components_
+
+    # Prepara señales auxiliares (resampleadas igual que raw_eeg_resamp)
+    aux = {}
+    for name, kind in [(veog, "VEOG"), (heog, "HEOG"), (ecg, "ECG")]:
+        if name:
+            sig = raw.copy().pick([name]).resample(raw_eeg_resamp.info["sfreq"], npad="auto").get_data()[0]
+            aux[kind] = sig
+
+    if aux:
+        S = sources.get_data()  # shape (n_comp, n_times)
+        for k in range(n_comp):
+            row = {"component": k}
+            for kind, sig in aux.items():
+                # correlación (robusta y rápida)
+                a = S[k]
+                # evitar división por cero
+                if np.std(a) == 0 or np.std(sig) == 0:
+                    r = 0.0
+                else:
+                    r = float(np.corrcoef(a, sig)[0, 1])
+                row[f"corr_{kind}"] = r
+            rows.append(row)
+
+        df = pd.DataFrame(rows).fillna(0.0)
+
+        # sugerencias simples (umbral típico; ajusta si quieres)
+        # ojo: solo sugerimos, no excluimos
+        df["suggest_eog"] = (df.get("corr_VEOG", 0).abs() > 0.30) | (df.get("corr_HEOG", 0).abs() > 0.30)
+        df["suggest_ecg"] = (df.get("corr_ECG", 0).abs() > 0.30)
+
+        score_csv = OUT_DIR / "ica_component_scores.csv"
+        df.to_csv(score_csv, index=False)
+        print("✔ ICA component scores saved:", score_csv)
+    else:
+        print("⚠ No VEOG/HEOG/ECG channels found → no component scoring.")
+
+    print("✓ ICA TRAINING COMPLETE for sub-P01")
+
+if __name__ == "__main__":
+    step3_ica_training()
